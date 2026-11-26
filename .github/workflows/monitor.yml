@@ -1,0 +1,55 @@
+name: Monitoreo de precios
+
+on:
+  schedule:
+    # Cron de GitHub usa hora UTC. Chile (verano) es UTC-3.
+    # Ventana: vie 27-nov 00:00 hasta lun 30-nov 23:59 (Chile) = 27-nov 03:00 UTC hasta 01-dic 02:59 UTC.
+    # El script vuelve a comprobar la ventana, asi que las corridas sobrantes no hacen nada.
+    - cron: "*/30 * 27-30 11 *"
+    - cron: "*/30 0-2 1 12 *"
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "forzar = ignora la ventana | test = correo de prueba | normal"
+        type: choice
+        options:
+          - forzar
+          - test
+          - normal
+        default: forzar
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monitoreo-precios
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ejecutar monitor
+        env:
+          REMITENTE: ${{ secrets.REMITENTE }}
+          DESTINATARIO: ${{ secrets.DESTINATARIO }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MODO: ${{ github.event.inputs.modo || 'normal' }}
+        run: |
+          case "$MODO" in
+            forzar) python3 monitor.py --forzar ;;
+            test) python3 monitor.py --test ;;
+            *) python3 monitor.py ;;
+          esac
+
+      - name: Guardar estado (para no repetir avisos)
+        run: |
+          if [ -f estado.json ]; then
+            git config user.name "monitoreo-precios"
+            git config user.email "actions@users.noreply.github.com"
+            git add estado.json
+            git diff --cached --quiet || (git commit -m "Actualizar estado" && git push)
+          fi
