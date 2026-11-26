@@ -8,9 +8,10 @@ repetir el mismo correo cada 30 minutos.
 Uso:
   python monitor.py            -> corrida normal (solo funciona dentro de la ventana)
   python monitor.py --forzar   -> ignora la ventana (para probar lectura de precios)
-  python monitor.py --test     -> envia un correo de prueba y termina
+  python monitor.py --test     -> envia un correo SIMULACRO con datos inventados
 """
 import csv
+import html as _html
 import io
 import json
 import os
@@ -33,6 +34,21 @@ UA = {
     "User-Agent": "monitoreo-precios/1.0 (uso personal, 1 consulta cada 30 min)",
     "Accept-Language": "es-CL,es;q=0.9",
 }
+DISPONIBILIDAD = {
+    "InStock": "En stock",
+    "OutOfStock": "Agotado",
+    "SoldOut": "Agotado",
+    "PreOrder": "Preventa",
+    "BackOrder": "Sobre pedido",
+    "LimitedAvailability": "Stock limitado",
+    "InStoreOnly": "Solo en tienda",
+    "OnlineOnly": "Solo online",
+    "Discontinued": "Descontinuado",
+}
+AVISO_PAGO = (
+    "Medio de pago, IVA y costo de despacho no se verifican automáticamente: "
+    "confirmar en el enlace antes de comprar."
+)
 
 
 def descargar(url):
@@ -114,25 +130,158 @@ def clp(n):
     return "$ " + f"{n:,}".replace(",", ".")
 
 
-def enviar(asunto, cuerpo):
+# ---------------------------------------------------------------- correo ----
+def construir_correo(hallazgos, no_verificados, ahora, simulacro=False):
+    """Devuelve (asunto, texto_plano, html). Cada hallazgo es un dict con:
+    producto, tienda, ref, precio, dif, disp, url, nota."""
+    n = len(hallazgos)
+    pref = "[SIMULACRO] " if simulacro else ""
+    if n == 1:
+        h = hallazgos[0]
+        asunto = f"{pref}{h['producto']}: {clp(h['dif'])} más barato en {h['tienda']}"
+    else:
+        asunto = f"{pref}{n} productos con diferencia mayor a {clp(UMBRAL)}"
+
+    hora = f"{ahora:%d-%m-%Y %H:%M} (hora de Chile)"
+
+    # --- texto plano
+    t = []
+    if simulacro:
+        t.append("*** SIMULACRO: los datos de este correo son inventados. ***\n")
+    t.append(f"Se encontraron {n} producto(s) con una diferencia mayor a {clp(UMBRAL)}.")
+    t.append(f"Revisión: {hora}\n")
+    t.append("RESUMEN")
+    for h in hallazgos:
+        t.append(f"- {h['producto']}: {clp(h['dif'])} más barato en {h['tienda']} "
+                 f"({clp(h['precio'])} vs referencia {clp(h['ref'])})")
+    t.append("\nDETALLE")
+    for i, h in enumerate(hallazgos, 1):
+        t += [
+            f"\n{i}) {h['producto']}",
+            f"   Tienda: {h['tienda']}",
+            f"   Precio de referencia: {clp(h['ref'])}",
+            f"   Precio encontrado: {clp(h['precio'])}",
+            f"   Diferencia: {clp(h['dif'])}",
+            f"   Disponibilidad: {h['disp']}",
+            f"   Enlace: {h['url']}",
+        ]
+        if h.get("nota"):
+            t.append(f"   OJO: {h['nota']}")
+    t.append(f"\n{AVISO_PAGO}")
+    if no_verificados:
+        t.append("\nNo se pudo verificar:")
+        t += [f"- {x}" for x in no_verificados]
+    texto = "\n".join(t)
+
+    # --- html (diseño corporativo: solo tablas y estilos en línea, lo lee cualquier correo)
+    e = _html.escape
+    color_disp = {
+        "En stock": ("#065f46", "#d1fae5"),
+        "Stock limitado": ("#92400e", "#fef3c7"),
+        "Agotado": ("#991b1b", "#fee2e2"),
+    }
+
+    def tarjeta(h):
+        fg, bg = color_disp.get(h["disp"], ("#374151", "#e5e7eb"))
+        pct = f"{h['dif'] / h['ref'] * 100:.1f}".replace(".", ",")
+        nota = ""
+        if h.get("nota"):
+            nota = (
+                "<div style='margin-top:16px;background:#fffbeb;border-left:4px solid #f59e0b;"
+                "padding:10px 12px;font-size:13px;color:#92400e'>"
+                f"<b>Atención:</b> {e(h['nota'])}</div>"
+            )
+        fila = ("<tr><td style='padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280'>{k}</td>"
+                "<td align='right' style='padding:10px 0;border-bottom:1px solid #eef0f3;color:#111827'>{v}</td></tr>")
+        return f"""
+<table role="presentation" width="100%" style="border-collapse:separate;border:1px solid #e5e7eb;border-radius:10px;margin:0 0 20px">
+<tr><td style="padding:22px">
+  <div style="font-size:11px;letter-spacing:1.6px;color:#6b7280;text-transform:uppercase">{e(h['tienda'])}</div>
+  <div style="font-size:18px;font-weight:700;color:#0f2a47;margin:4px 0 16px;line-height:1.3">{e(h['producto'])}</div>
+  <table role="presentation" width="100%" style="border-collapse:collapse"><tr>
+    <td style="background:#ecfdf5;border-radius:8px;padding:14px 18px">
+      <div style="font-size:11px;color:#047857;text-transform:uppercase;letter-spacing:1.2px">Ahorro frente a la referencia</div>
+      <div style="font-size:32px;font-weight:700;color:#047857;line-height:1.2">{e(clp(h['dif']))}
+        <span style="font-size:15px;font-weight:600">(-{pct} %)</span></div>
+    </td></tr></table>
+  <table role="presentation" width="100%" style="border-collapse:collapse;margin-top:12px;font-size:14px">
+    {fila.format(k='Precio de referencia', v=e(clp(h['ref'])))}
+    {fila.format(k='Precio encontrado', v='<b>' + e(clp(h['precio'])) + '</b>')}
+    {fila.format(k='Disponibilidad', v=f"<span style='background:{bg};color:{fg};padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600'>{e(h['disp'])}</span>")}
+  </table>
+  <div style="margin-top:20px">
+    <a href="{e(h['url'], quote=True)}" style="display:inline-block;background:#0b6bcb;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 24px;border-radius:6px">Ver producto en {e(h['tienda'])} &rarr;</a>
+  </div>
+  {nota}
+</td></tr></table>"""
+
+    banner = ""
+    if simulacro:
+        banner = ("<tr><td style='background:#fef3c7;padding:12px 28px;font-size:13px;color:#92400e;"
+                  "border-bottom:1px solid #fcd34d'><b>SIMULACRO:</b> los datos de este correo son "
+                  "inventados y sirven solo para ver el formato.</td></tr>")
+    nv = ""
+    if no_verificados:
+        nv = ("<div style='margin-top:6px;font-size:13px;color:#374151'><b>No se pudo verificar:</b><br>"
+              + "<br>".join(e(x) for x in no_verificados) + "</div>")
+    cuerpo = f"""<div style="background:#eef1f5;padding:24px 12px;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#111827">
+<table role="presentation" width="100%" style="max-width:600px;margin:0 auto;border-collapse:collapse">
+  <tr><td style="background:#0f2a47;border-radius:10px 10px 0 0;padding:28px">
+    <div style="color:#8fb4e3;font-size:11px;letter-spacing:2.4px;text-transform:uppercase">Monitoreo de precios &middot; Black Friday 2026</div>
+    <div style="color:#ffffff;font-size:26px;font-weight:700;margin-top:8px">Alerta de precios</div>
+    <div style="color:#c9d6e8;font-size:14px;margin-top:8px">{n} oportunidad(es) con diferencia mayor a {e(clp(UMBRAL))} &middot; {e(hora)}</div>
+  </td></tr>
+  {banner}
+  <tr><td style="background:#ffffff;padding:26px 28px 8px">{''.join(tarjeta(h) for h in hallazgos)}</td></tr>
+  <tr><td style="background:#f8fafc;border-radius:0 0 10px 10px;padding:18px 28px 22px;font-size:12px;color:#6b7280;line-height:1.6">
+    <div><b>Referencia:</b> precios de la hoja de cotización (pago en efectivo o transferencia).</div>
+    <div>{e(AVISO_PAGO)}</div>
+    {nv}
+    <div style="margin-top:10px;color:#9ca3af">Mensaje automático del monitoreo de precios. Revisión cada 30 minutos hasta el lunes 30 de noviembre.</div>
+  </td></tr>
+</table></div>"""
+    return asunto, texto, cuerpo
+
+
+def enviar(asunto, texto, html=None):
     msg = EmailMessage()
     msg["Subject"] = asunto
     msg["From"] = os.environ["REMITENTE"].strip()
     msg["To"] = os.environ["DESTINATARIO"].strip()
-    msg.set_content(cuerpo)
+    msg.set_content(texto)
+    if html:
+        msg.add_alternative(html, subtype="html")
     clave = os.environ["GMAIL_APP_PASSWORD"].replace(" ", "")
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(msg["From"], clave)
         s.send_message(msg)
 
 
+def hallazgo_ejemplo():
+    """Datos INVENTADOS para el correo simulacro (--test)."""
+    return {
+        "producto": "MSI GEFORCE RTX 5070 TI SHADOW 3X OC (EJEMPLO)",
+        "tienda": "tienda-ejemplo.cl",
+        "ref": 1544928,
+        "precio": 1489990,
+        "dif": 1544928 - 1489990,
+        "disp": "En stock",
+        "url": "https://tienda-ejemplo.cl/producto-inventado",
+        "nota": "",
+    }
+
+
 def main():
     args = sys.argv[1:]
-    if "--test" in args:
-        enviar("Prueba del monitoreo de precios", "Si lees esto, el envio de correos funciona.")
-        print("Correo de prueba enviado.")
-        return
     ahora = datetime.now(TZ)
+    if "--test" in args:
+        asunto, texto, cuerpo = construir_correo(
+            [hallazgo_ejemplo()], ["Ejemplo de producto sin verificar en otra-tienda.cl"],
+            ahora, simulacro=True,
+        )
+        enviar(asunto, texto, cuerpo)
+        print("Correo SIMULACRO enviado.")
+        return
     if "--forzar" not in args and not (INICIO <= ahora <= FIN):
         print(f"Fuera de la ventana ({ahora:%d-%m-%Y %H:%M}). No se hace nada.")
         return
@@ -148,9 +297,9 @@ def main():
             tienda = urlparse(url).netloc.replace("www.", "")
             try:
                 precio, disp = extraer_precio(descargar(url))
-            except Exception as e:  # sitio caido, bloqueo, etc.
+            except Exception as ex:  # sitio caido, bloqueo, etc.
                 precio, disp = None, None
-                print(f"[ERROR] {tienda}: {e}")
+                print(f"[ERROR] {tienda}: {ex}")
             if precio is None:
                 no_verificados.append(f"{p['producto']} en {tienda}")
                 print(f"[SIN PRECIO] {p['producto']} | {tienda}")
@@ -160,30 +309,17 @@ def main():
             if dif > UMBRAL and estado.get(url) != precio:
                 nota = ""
                 if abs(precio - p["ref"] / 1.19) < p["ref"] * 0.02:
-                    nota = "  OJO: el precio parece NETO (sin IVA); la diferencia podria no ser real.\n"
-                hallazgos.append(
-                    f"Producto: {p['producto']}\n"
-                    f"Tienda: {tienda}\n"
-                    f"Precio de referencia: {clp(p['ref'])}\n"
-                    f"Precio encontrado: {clp(precio)}\n"
-                    f"Diferencia: {clp(dif)}\n"
-                    f"Disponibilidad: {disp}\n"
-                    f"Enlace: {url}\n"
-                    f"{nota}"
-                    "Medio de pago / IVA / costo de despacho: NO verificado automaticamente; "
-                    "confirmar en el enlace.\n"
-                )
-            if precio is not None:
-                estado[url] = precio
+                    nota = "el precio parece NETO (sin IVA); la diferencia podría no ser real."
+                hallazgos.append({
+                    "producto": p["producto"], "tienda": tienda, "ref": p["ref"],
+                    "precio": precio, "dif": dif,
+                    "disp": DISPONIBILIDAD.get(disp, disp), "url": url, "nota": nota,
+                })
+            estado[url] = precio
 
     if hallazgos:
-        cuerpo = (
-            f"Diferencias mayores a {clp(UMBRAL)} (referencia: precios de la hoja, con IVA).\n"
-            f"Revision: {ahora:%d-%m-%Y %H:%M} (hora de Chile)\n\n" + "\n".join(hallazgos)
-        )
-        if no_verificados:
-            cuerpo += "\nNo se pudo verificar:\n- " + "\n- ".join(no_verificados) + "\n"
-        enviar(f"Alerta de precios: {len(hallazgos)} diferencia(s) mayor(es) a {clp(UMBRAL)}", cuerpo)
+        asunto, texto, cuerpo = construir_correo(hallazgos, no_verificados, ahora)
+        enviar(asunto, texto, cuerpo)
         print(f"Correo enviado con {len(hallazgos)} hallazgo(s).")
     else:
         print("Sin diferencias nuevas mayores al umbral.")
