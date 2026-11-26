@@ -18,6 +18,7 @@ import os
 import re
 import smtplib
 import sys
+import time
 import urllib.request
 from datetime import datetime
 from email.message import EmailMessage
@@ -130,6 +131,121 @@ def clp(n):
     return "$ " + f"{n:,}".replace(",", ".")
 
 
+# ------------------------------------------------------------- SoloTodo ----
+HOSTS_IGNORADOS = (
+    "solotodo.cl", "facebook.com", "instagram.com", "twitter.com", "x.com", "youtube.com",
+    "google.com", "googleapis.com", "gstatic.com", "apple.com", "tiktok.com", "linkedin.com",
+    "whatsapp.com", "wa.me", "cloudflare.com", "w3.org", "schema.org",
+)
+PRECIO_RE = r"\$\s?(\d{1,3}(?:\.\d{3})+)"
+
+
+def host_de(url):
+    return urlparse(url).netloc.lower().replace("www.", "")
+
+
+def host_ignorado(host):
+    return any(host == h or host.endswith("." + h) for h in HOSTS_IGNORADOS)
+
+
+def texto_plano(fragmento):
+    t = re.sub(r"<(script|style)\b.*?</\1>", " ", fragmento, flags=re.S | re.I)
+    t = re.sub(r"<[^>]+>", " ", t)
+    return _html.unescape(re.sub(r"\s+", " ", t))
+
+
+def leer_solotodo(html, ref):
+    """Lee una pagina de producto de SoloTodo.
+
+    Devuelve (tiendas, diagnostico). Cada tienda es un dict con url (enlace directo
+    a la tienda), host, efectivo y normal. Si la pagina no trae lo esperado devuelve
+    lista vacia: nunca inventa datos.
+    """
+    anclas = []
+    for m in re.finditer(r'<a\b[^>]*?href=["\'](https?://[^"\'\s>]+)["\']', html, flags=re.I):
+        url = _html.unescape(m.group(1))
+        host = host_de(url)
+        if host and not host_ignorado(host):
+            anclas.append((url, host, m.start(), html.find(">", m.end()) + 1))
+    hosts = sorted({h for _u, h, _i, _f in anclas})[:8]
+    diag = (
+        f"bytes={len(html)} json_ld={'si' if 'ld+json' in html.lower() else 'no'} "
+        f"next_data={'si' if '__NEXT_DATA__' in html else 'no'} "
+        f"enlaces_externos={len(anclas)} hosts={','.join(hosts) or '-'}"
+    )
+    segmentos = {}
+    for i, (url, host, _ini, fin) in enumerate(anclas):
+        limite = len(html)
+        for _u, h2, ini2, _f in anclas[i + 1:]:
+            if h2 != host:
+                limite = ini2
+                break
+        segmentos[url] = segmentos.get(url, "") + " " + texto_plano(html[fin:min(limite, fin + 3000)])
+
+    tiendas, vistos = [], set()
+    for url, seg in segmentos.items():
+        host = host_de(url)
+        if host in vistos:
+            continue
+        ef = re.search(r"efectivo\D{0,60}?" + PRECIO_RE, seg, flags=re.I)
+        no = re.search(r"normal\D{0,60}?" + PRECIO_RE, seg, flags=re.I)
+        if ef:
+            efectivo = parse_precio(ef.group(1))
+            normal = parse_precio(no.group(1)) if no else None
+        else:
+            nums = [parse_precio(x) for x in re.findall(PRECIO_RE, seg)][:2]
+            if not nums:
+                continue
+            efectivo = min(nums)  # el precio en efectivo nunca supera al normal
+            normal = max(nums) if len(nums) == 2 else None
+        if not (0.5 * ref <= efectivo <= 1.6 * ref):
+            continue  # fuera de rango: probablemente no es el precio de este producto
+        vistos.add(host)
+        tiendas.append({"url": url, "host": host, "efectivo": efectivo, "normal": normal})
+    return tiendas, diag
+
+
+def registrar_hallazgo(p, tienda, url, precio, disp, estado, hallazgos,
+                       clave=None, fuente=None, url_comp=None, normal=None):
+    """Compara contra la referencia y, si corresponde, agrega un hallazgo nuevo."""
+    clave = clave or url
+    dif = p["ref"] - precio
+    if dif > UMBRAL and estado.get(clave) != precio:
+        nota = ""
+        if abs(precio - p["ref"] / 1.19) < p["ref"] * 0.02:
+            nota = "el precio parece NETO (sin IVA); la diferencia podría no ser real."
+        hallazgos.append({
+            "producto": p["producto"], "tienda": tienda, "ref": p["ref"],
+            "precio": precio, "dif": dif, "disp": DISPONIBILIDAD.get(disp, disp),
+            "url": url, "nota": nota, "fuente": fuente, "url_comp": url_comp, "normal": normal,
+        })
+    estado[clave] = precio
+    return dif
+
+
+def revisar_solotodo(p, url, directos, estado, hallazgos, no_verificados):
+    time.sleep(2)  # cortesia: espaciar las consultas a SoloTodo
+    try:
+        tiendas, diag = leer_solotodo(descargar(url), p["ref"])
+    except Exception as ex:
+        print(f"[ERROR] solotodo.cl: {ex}")
+        no_verificados.append(f"{p['producto']} en SoloTodo (no se pudo abrir la página)")
+        return
+    print(f"[SOLOTODO] {p['producto']} | {diag} | tiendas leidas: {len(tiendas)}")
+    if not tiendas:
+        no_verificados.append(f"{p['producto']} en SoloTodo (no se pudo leer la lista de tiendas)")
+        return
+    for t in tiendas:
+        if t["host"] in directos:
+            continue  # esa tienda ya se revisa directo, con datos mas frescos
+        dif = registrar_hallazgo(
+            p, t["host"], t["url"], t["efectivo"], "No informada por SoloTodo", estado, hallazgos,
+            clave="solotodo:" + t["url"], fuente="SoloTodo", url_comp=url, normal=t["normal"],
+        )
+        print(f"[SOLOTODO OK] {t['host']} | efectivo {t['efectivo']} | normal {t['normal']} "
+              f"| ref {p['ref']} | dif {dif}")
+
+
 # ---------------------------------------------------------------- correo ----
 def construir_correo(hallazgos, no_verificados, ahora, simulacro=False):
     """Devuelve (asunto, texto_plano, html). Cada hallazgo es un dict con:
@@ -165,6 +281,12 @@ def construir_correo(hallazgos, no_verificados, ahora, simulacro=False):
             f"   Disponibilidad: {h['disp']}",
             f"   Enlace: {h['url']}",
         ]
+        if h.get("normal"):
+            t.append(f"   Precio normal (otro medio de pago): {clp(h['normal'])}")
+        if h.get("fuente"):
+            t.append(f"   Fuente: {h['fuente']} (puede estar desfasado; confirmar en la tienda)")
+        if h.get("url_comp"):
+            t.append(f"   Comparación en SoloTodo: {h['url_comp']}")
         if h.get("nota"):
             t.append(f"   OJO: {h['nota']}")
     t.append(f"\n{AVISO_PAGO}")
@@ -193,6 +315,16 @@ def construir_correo(hallazgos, no_verificados, ahora, simulacro=False):
             )
         fila = ("<tr><td style='padding:10px 0;border-bottom:1px solid #eef0f3;color:#6b7280'>{k}</td>"
                 "<td align='right' style='padding:10px 0;border-bottom:1px solid #eef0f3;color:#111827'>{v}</td></tr>")
+        extra = ""
+        if h.get("normal"):
+            extra += fila.format(k="Precio normal (otro medio de pago)", v=e(clp(h["normal"])))
+        if h.get("fuente"):
+            extra += fila.format(k="Fuente", v=e(h["fuente"]) + " <span style='color:#9ca3af'>(puede estar desfasado)</span>")
+        enlace_comp = ""
+        if h.get("url_comp"):
+            enlace_comp = ("<div style='margin-top:12px;font-size:13px'>"
+                           f"<a href=\"{e(h['url_comp'], quote=True)}\" style='color:#0b6bcb'>"
+                           "Ver comparación en SoloTodo</a></div>")
         return f"""
 <table role="presentation" width="100%" style="border-collapse:separate;border:1px solid #e5e7eb;border-radius:10px;margin:0 0 20px">
 <tr><td style="padding:22px">
@@ -208,10 +340,12 @@ def construir_correo(hallazgos, no_verificados, ahora, simulacro=False):
     {fila.format(k='Precio de referencia', v=e(clp(h['ref'])))}
     {fila.format(k='Precio encontrado', v='<b>' + e(clp(h['precio'])) + '</b>')}
     {fila.format(k='Disponibilidad', v=f"<span style='background:{bg};color:{fg};padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600'>{e(h['disp'])}</span>")}
+    {extra}
   </table>
   <div style="margin-top:20px">
     <a href="{e(h['url'], quote=True)}" style="display:inline-block;background:#0b6bcb;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 24px;border-radius:6px">Ver producto en {e(h['tienda'])} &rarr;</a>
   </div>
+  {enlace_comp}
   {nota}
 </td></tr></table>"""
 
@@ -268,6 +402,9 @@ def hallazgo_ejemplo():
         "disp": "En stock",
         "url": "https://tienda-ejemplo.cl/producto-inventado",
         "nota": "",
+        "fuente": "SoloTodo",
+        "url_comp": "https://www.solotodo.cl/products/271704",
+        "normal": 1565000,
     }
 
 
@@ -293,8 +430,12 @@ def main():
 
     hallazgos, no_verificados = [], []
     for p in cargar_productos():
+        directos = {host_de(u) for u in p["links"] if "solotodo.cl" not in u.lower()}
         for url in p["links"]:
-            tienda = urlparse(url).netloc.replace("www.", "")
+            tienda = host_de(url)
+            if tienda.endswith("solotodo.cl"):
+                revisar_solotodo(p, url, directos, estado, hallazgos, no_verificados)
+                continue
             try:
                 precio, disp = extraer_precio(descargar(url))
             except Exception as ex:  # sitio caido, bloqueo, etc.
@@ -304,18 +445,8 @@ def main():
                 no_verificados.append(f"{p['producto']} en {tienda}")
                 print(f"[SIN PRECIO] {p['producto']} | {tienda}")
                 continue
-            dif = p["ref"] - precio
+            dif = registrar_hallazgo(p, tienda, url, precio, disp, estado, hallazgos)
             print(f"[OK] {p['producto']} | {tienda} | ref {p['ref']} | hoy {precio} | dif {dif}")
-            if dif > UMBRAL and estado.get(url) != precio:
-                nota = ""
-                if abs(precio - p["ref"] / 1.19) < p["ref"] * 0.02:
-                    nota = "el precio parece NETO (sin IVA); la diferencia podría no ser real."
-                hallazgos.append({
-                    "producto": p["producto"], "tienda": tienda, "ref": p["ref"],
-                    "precio": precio, "dif": dif,
-                    "disp": DISPONIBILIDAD.get(disp, disp), "url": url, "nota": nota,
-                })
-            estado[url] = precio
 
     if hallazgos:
         asunto, texto, cuerpo = construir_correo(hallazgos, no_verificados, ahora)
