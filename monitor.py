@@ -22,7 +22,7 @@ import time
 import urllib.request
 from datetime import datetime
 from email.message import EmailMessage
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from zoneinfo import ZoneInfo
 
 SHEET_ID = "1R6GX1hd8jc8f4T4w-nfSzjJyX4xIHAltbaF0iuqoFWo"
@@ -246,6 +246,51 @@ def revisar_solotodo(p, url, directos, estado, hallazgos, no_verificados):
               f"| ref {p['ref']} | dif {dif}")
 
 
+# ------------------------------------------------------------ historial ----
+# Cada oferta detectada se anota como una fila nueva en la hoja "Historial de ofertas"
+# (se escribe a traves de un formulario de Google vinculado a esa hoja; no usa claves).
+FORMULARIO_URL = ("https://docs.google.com/forms/d/e/"
+                  "1FAIpQLSex-1QqxYcd7wrRJSwKPSCJUncW7JaSBB8PkEf-6IlOA-cVAA/formResponse")
+CAMPOS_FORMULARIO = {
+    "fecha": "entry.788049196",
+    "producto": "entry.969117883",
+    "tienda": "entry.2065487698",
+    "ref": "entry.791415533",
+    "precio": "entry.923486180",
+    "dif": "entry.36295949",
+    "url": "entry.1032563889",
+}
+
+
+def fila_historial(h, ahora):
+    tienda = h["tienda"] + (f" (vía {h['fuente']})" if h.get("fuente") else "")
+    return {
+        CAMPOS_FORMULARIO["fecha"]: f"{ahora:%d-%m-%Y %H:%M}",
+        CAMPOS_FORMULARIO["producto"]: h["producto"],
+        CAMPOS_FORMULARIO["tienda"]: tienda,
+        CAMPOS_FORMULARIO["ref"]: str(h["ref"]),
+        CAMPOS_FORMULARIO["precio"]: str(h["precio"]),
+        CAMPOS_FORMULARIO["dif"]: str(h["dif"]),
+        CAMPOS_FORMULARIO["url"]: h["url"],
+    }
+
+
+def anotar_historial(hallazgos, ahora):
+    """Agrega una fila por hallazgo. Si falla, lo avisa en el registro pero nunca
+    interrumpe el monitoreo ni el correo."""
+    for h in hallazgos:
+        try:
+            req = urllib.request.Request(
+                FORMULARIO_URL,
+                data=urlencode(fila_historial(h, ahora)).encode("utf-8"),
+                headers={**UA, "Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as r:
+                print(f"[HISTORIAL] {h['producto']} | {h['tienda']} | respuesta HTTP {r.status}")
+        except Exception as ex:
+            print(f"[HISTORIAL ERROR] {h['producto']} | {h['tienda']}: {ex}")
+
+
 # ---------------------------------------------------------------- correo ----
 def construir_correo(hallazgos, no_verificados, ahora, simulacro=False):
     """Devuelve (asunto, texto_plano, html). Cada hallazgo es un dict con:
@@ -452,6 +497,7 @@ def main():
         asunto, texto, cuerpo = construir_correo(hallazgos, no_verificados, ahora)
         enviar(asunto, texto, cuerpo)
         print(f"Correo enviado con {len(hallazgos)} hallazgo(s).")
+        anotar_historial(hallazgos, ahora)
     else:
         print("Sin diferencias nuevas mayores al umbral.")
 
