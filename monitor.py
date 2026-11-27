@@ -354,7 +354,7 @@ def construir_correo(hallazgos, no_verificados, ahora, simulacro=False):
         nota = ""
         if h.get("nota"):
             nota = (
-                "<div style='margin-top:16px;background:#fffbeb;border-left:4px solid #f59e0b;"
+                "<div style='margin-top:16px;background-color:#fffbeb;border-left:4px solid #f59e0b;"
                 "padding:10px 12px;font-size:13px;color:#92400e'>"
                 f"<b>Atención:</b> {e(h['nota'])}</div>"
             )
@@ -376,7 +376,7 @@ def construir_correo(hallazgos, no_verificados, ahora, simulacro=False):
   <div style="font-size:11px;letter-spacing:1.6px;color:#6b7280;text-transform:uppercase">{e(h['tienda'])}</div>
   <div style="font-size:18px;font-weight:700;color:#0f2a47;margin:4px 0 16px;line-height:1.3">{e(h['producto'])}</div>
   <table role="presentation" width="100%" style="border-collapse:collapse"><tr>
-    <td style="background:#ecfdf5;border-radius:8px;padding:14px 18px">
+    <td bgcolor="#ecfdf5" style="background-color:#ecfdf5;border-radius:8px;padding:14px 18px">
       <div style="font-size:11px;color:#047857;text-transform:uppercase;letter-spacing:1.2px">Ahorro frente a la referencia</div>
       <div style="font-size:32px;font-weight:700;color:#047857;line-height:1.2">{e(clp(h['dif']))}
         <span style="font-size:15px;font-weight:600">(-{pct} %)</span></div>
@@ -384,35 +384,33 @@ def construir_correo(hallazgos, no_verificados, ahora, simulacro=False):
   <table role="presentation" width="100%" style="border-collapse:collapse;margin-top:12px;font-size:14px">
     {fila.format(k='Precio de referencia', v=e(clp(h['ref'])))}
     {fila.format(k='Precio encontrado', v='<b>' + e(clp(h['precio'])) + '</b>')}
-    {fila.format(k='Disponibilidad', v=f"<span style='background:{bg};color:{fg};padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600'>{e(h['disp'])}</span>")}
+    {fila.format(k='Disponibilidad', v=f"<span style='background-color:{bg};color:{fg};padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600'>{e(h['disp'])}</span>")}
     {extra}
   </table>
-  <div style="margin-top:20px">
-    <a href="{e(h['url'], quote=True)}" style="display:inline-block;background:#0b6bcb;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 24px;border-radius:6px">Ver producto en {e(h['tienda'])} &rarr;</a>
-  </div>
+  <table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:20px"><tr><td bgcolor="#0b6bcb" style="background-color:#0b6bcb;border-radius:6px"><a href="{e(h['url'], quote=True)}" style="display:inline-block;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 24px">Ver producto en {e(h['tienda'])} &rarr;</a></td></tr></table>
   {enlace_comp}
   {nota}
 </td></tr></table>"""
 
     banner = ""
     if simulacro:
-        banner = ("<tr><td style='background:#fef3c7;padding:12px 28px;font-size:13px;color:#92400e;"
+        banner = ("<tr><td bgcolor='#fef3c7' style='background-color:#fef3c7;padding:12px 28px;font-size:13px;color:#92400e;"
                   "border-bottom:1px solid #fcd34d'><b>SIMULACRO:</b> los datos de este correo son "
                   "inventados y sirven solo para ver el formato.</td></tr>")
     nv = ""
     if no_verificados:
         nv = ("<div style='margin-top:6px;font-size:13px;color:#374151'><b>No se pudo verificar:</b><br>"
               + "<br>".join(e(x) for x in no_verificados) + "</div>")
-    cuerpo = f"""<div style="background:#eef1f5;padding:24px 12px;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#111827">
+    cuerpo = f"""<div style="background-color:#eef1f5;padding:24px 12px;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#111827">
 <table role="presentation" width="100%" style="max-width:600px;margin:0 auto;border-collapse:collapse">
-  <tr><td style="background:#0f2a47;border-radius:10px 10px 0 0;padding:28px">
+  <tr><td bgcolor="#0f2a47" style="background-color:#0f2a47;border-radius:10px 10px 0 0;padding:28px">
     <div style="color:#8fb4e3;font-size:11px;letter-spacing:2.4px;text-transform:uppercase">Monitoreo de precios &middot; Black Friday 2026</div>
     <div style="color:#ffffff;font-size:26px;font-weight:700;margin-top:8px">Alerta de precios</div>
     <div style="color:#c9d6e8;font-size:14px;margin-top:8px">{n} oportunidad(es) con diferencia mayor a {e(clp(UMBRAL))} &middot; {e(hora)}</div>
   </td></tr>
   {banner}
-  <tr><td style="background:#ffffff;padding:26px 28px 8px">{''.join(tarjeta(h) for h in hallazgos)}</td></tr>
-  <tr><td style="background:#f8fafc;border-radius:0 0 10px 10px;padding:18px 28px 22px;font-size:12px;color:#6b7280;line-height:1.6">
+  <tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:26px 28px 8px">{''.join(tarjeta(h) for h in hallazgos)}</td></tr>
+  <tr><td bgcolor="#f8fafc" style="background-color:#f8fafc;border-radius:0 0 10px 10px;padding:18px 28px 22px;font-size:12px;color:#6b7280;line-height:1.6">
     <div><b>Referencia:</b> precios de la hoja de cotización (pago en efectivo o transferencia).</div>
     <div>{e(AVISO_PAGO)}</div>
     {nv}
