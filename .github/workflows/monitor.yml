@@ -2,24 +2,23 @@ name: Monitoreo de precios
 
 on:
   schedule:
-    # Cron de GitHub usa hora UTC. Chile (verano) es UTC-3.
-    # Ventana: vie 27-nov 00:00 hasta lun 30-nov 23:59 (Chile) = 27-nov 03:00 UTC hasta 01-dic 02:59 UTC.
-    # El script vuelve a comprobar la ventana, asi que las corridas sobrantes no hacen nada.
+    # Respaldo: cron en UTC. Ventana: vie 27-nov 00:00 a lun 30-nov 23:59 (Chile).
     - cron: "7,37 * 27-30 11 *"
     - cron: "7,37 0-2 1 12 *"
   workflow_dispatch:
     inputs:
       modo:
-        description: "forzar = ignora la ventana | test = correo de prueba | normal"
+        description: "normal = respeta la ventana | forzar = ignora la ventana | test = correo de prueba (no usar)"
         type: choice
         options:
+          - normal
           - forzar
           - test
-          - normal
-        default: forzar
+        default: normal
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: monitoreo-precios
@@ -28,28 +27,47 @@ concurrency:
 jobs:
   revisar:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ejecutar monitor
+      - name: Monitorear cada 30 minutos (unas 5 horas)
         env:
           REMITENTE: ${{ secrets.REMITENTE }}
           DESTINATARIO: ${{ secrets.DESTINATARIO }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           MODO: ${{ github.event.inputs.modo || 'normal' }}
         run: |
-          case "$MODO" in
-            forzar) python3 monitor.py --forzar ;;
-            test) python3 monitor.py --test ;;
-            *) python3 monitor.py ;;
-          esac
+          FIN=$(date -u -d "2026-12-01 03:00:00" +%s)
+          git config user.name "monitoreo-precios"
+          git config user.email "actions@users.noreply.github.com"
+          for i in $(seq 1 10); do
+            echo "=== Revision $i - $(date -u) ==="
+            if [ "$i" = "1" ]; then M="$MODO"; else M="normal"; fi
+            case "$M" in
+              forzar) python3 monitor.py --forzar || true ;;
+              test) python3 monitor.py --test || true ;;
+              *) python3 monitor.py || true ;;
+            esac
+            if [ -f estado.json ]; then
+              git add estado.json
+              if ! git diff --cached --quiet; then
+                git commit -q -m "Actualizar estado"
+                git pull --rebase -q origin main || true
+                git push -q || true
+              fi
+            fi
+            [ "$MODO" = "test" ] && break
+            [ "$(date -u +%s)" -ge "$FIN" ] && break
+            [ "$i" -lt 10 ] && sleep 1800
+          done
 
-      - name: Guardar estado (para no repetir avisos)
+      - name: Lanzar la siguiente ejecucion
+        if: ${{ github.event.inputs.modo != 'test' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -f estado.json ]; then
-            git config user.name "monitoreo-precios"
-            git config user.email "actions@users.noreply.github.com"
-            git add estado.json
-            git diff --cached --quiet || (git commit -m "Actualizar estado" && git push)
+          FIN=$(date -u -d "2026-12-01 03:00:00" +%s)
+          if [ "$(date -u +%s)" -lt "$FIN" ]; then
+            gh workflow run monitor.yml --ref main -f modo=normal
           fi
