@@ -5,8 +5,8 @@ on:
     # Cron de GitHub usa hora UTC. Chile (verano) es UTC-3.
     # Ventana: vie 27-nov 00:00 hasta lun 30-nov 23:59 (Chile) = 27-nov 03:00 UTC hasta 01-dic 02:59 UTC.
     # El script vuelve a comprobar la ventana, asi que las corridas sobrantes no hacen nada.
-    - cron: "*/30 * 27-30 11 *"
-    - cron: "*/30 0-2 1 12 *"
+    - cron: "7,37 * 27-30 11 *"
+    - cron: "7,37 0-2 1 12 *"
   workflow_dispatch:
     inputs:
       modo:
